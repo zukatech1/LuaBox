@@ -712,272 +712,255 @@ class ObfuscatorDialog(QDialog):
         }
 
 
-# --- Lua Obfuscator ---
 class LuaObfuscator:
-    """Obfuscate Lua code with various techniques."""
-    
     def __init__(self, options):
         self.options = options
         self.var_map = {}
         self.var_counter = 0
-        
+        self.keywords = {'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function', 
+                         'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then', 
+                         'true', 'until', 'while', 'goto'}
+        self.roblox_globals = {'game', 'workspace', 'script', 'Instance', 'Vector3', 'CFrame', 
+                               'task', 'wait', 'spawn', 'print', 'warn', 'error', 'shared', 
+                               '_G', 'getgenv', 'getrenv', 'Enum', 'Color3', 'UDim2', 'math', 
+                               'string', 'table', 'pcall', 'xpcall', 'delay', 'tick', 'os'}
+    def tokenize(self, code):
+        """
+        Breaks Lua code into safe tokens.
+        Ensures we never obfuscate strings, comments, or keywords.
+        """
+        token_specification = [
+            ('COMMENT_MULTI', r'--\[\[.*?\]\]'),          # Multi-line comment
+            ('COMMENT_SINGLE', r'--.*'),                   # Single-line comment
+            ('STRING', r'["\']([^"\\]|\\.)*["\']'),        # String literals
+            ('NUMBER', r'\b\d+\.?\d*\b'),                  # Numbers
+            ('IDENTIFIER', r'[a-zA-Z_][a-zA-Z0-9_]*'),     # Variables/Functions
+            ('OPERATOR', r'[+\-*/%^#=<>~.|:,;{}()\[\]]'),  # Operators/Brackets
+            ('WHITESPACE', r'\s+'),                        # Space/Tabs/Newlines
+            ('MISMATCH', r'.'),                            # Anything else
+        ]
+        tok_regex = '|'.join('(?P<%s>%s)' % pair for pair in token_specification)
+        tokens = []
+        for mo in re.finditer(tok_regex, code, re.DOTALL):
+            kind = mo.lastgroup
+            value = mo.group()
+            tokens.append({'type': kind, 'value': value})
+        return tokens
+
     def obfuscate(self, code):
-        """Main obfuscation function."""
         result = code
-        
-        # Add watermark at the top
-        watermark = "--[[ obfuscated with luabox ]]"
-        result = watermark + result
-        
+
         # Step 1: Rename variables
-        
-        
-        # Step 1: Rename variables (before other transformations)
         if self.options['rename_vars']:
             result = self.rename_variables(result)
-        
-        # Step 2: ProxifyLocals — wrap locals in metatable proxies
+
+        # Step 2: ProxifyLocals
         if self.options.get('proxify_locals'):
             result = LuaProxifyLocals().proxify(result)
 
         # Step 3: Encode strings
         if self.options['encode_strings']:
             result = self.encode_strings(result)
-        
+
         # Step 4: Encode numbers
         if self.options['encode_numbers']:
             result = self.encode_numbers(result)
-        
-        # Step 5: Control flow obfuscation
+
+        # Step 5: Control flow
         if self.options['control_flow']:
             result = self.add_control_flow(result)
-        
-        # Step 6: Add junk code
+
+        # Step 6: Junk code
         if self.options['add_junk']:
             result = self.add_junk_code(result)
-        
+
         # Step 7: Anti-debug
         if self.options['anti_debug']:
             result = self.add_anti_debug(result)
-        
-        # Step 8: Wrap in function (skipped if vmify is on — vmify wraps it)
+
+        # Step 8: Wrap in function (skipped if vmify)
         if self.options['wrap_function'] and not self.options.get('vmify'):
             result = self.wrap_in_function(result)
-        
-        # Step 9: Minify (before vmify so payload is smaller)
+
+        # Step 9: Minify
         if self.options['minify']:
             result = self.minify_code(result)
 
-        # Step 10: Vmify — XOR-encode entire payload in a custom VM loader (applied last)
+        # Step 10: Vmify last
         if self.options.get('vmify'):
             result = LuaVmify().vmify(result)
-        
+
         return result
-        
-        
-    
-    # Name generation strategies
+
     def generate_var_name_mangled(self, var_id):
-        """Mangled name generator from Prometheus."""
         digits = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'
         start_digits = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        
         name = ''
         d = var_id % len(start_digits)
         var_id = (var_id - d) // len(start_digits)
         name = name + start_digits[d]
-        
         while var_id > 0:
             d = var_id % len(digits)
             var_id = (var_id - d) // len(digits)
             name = name + digits[d]
-        
         return name
-    
-    def generate_var_name_number(self, var_id):
-        """Simple hex number generator from Prometheus."""
-        return f"_{hex(var_id)[2:]}"
-    
-    def generate_var_name_confusing(self):
-        """Original confusing generator (Il1O0_ characters)."""
-        chars = 'Il1O0_'
-        name = ''
-        for _ in range(8):
-            name += chars[self.var_counter % len(chars)]
-            self.var_counter += 1
-        return '_' + name
-    
+
     def generate_var_name(self):
-        """Main var name generator - uses mangled by default."""
-        strategy = self.options.get('var_name_strategy', 'mangled')
-        
-        if strategy == 'mangled':
-            name = self.generate_var_name_mangled(self.var_counter)
-        elif strategy == 'number':
-            name = self.generate_var_name_number(self.var_counter)
-        elif strategy == 'confusing':
-            name = self.generate_var_name_confusing()
-        else:
-            name = self.generate_var_name_mangled(self.var_counter)
-        
+        name = self.generate_var_name_mangled(self.var_counter)
         self.var_counter += 1
         return name
-    
+
     def rename_variables(self, code):
-        """Rename local variables to random names."""
-        # This is a simplified version - a full implementation would need proper parsing
         lines = code.split('\n')
-        result_lines = []
-        
         for line in lines:
-            # Find local variable declarations
             if 'local ' in line and not line.strip().startswith('--'):
-                # Extract variable names after 'local'
                 match = re.search(r'local\s+([a-zA-Z_][a-zA-Z0-9_]*)', line)
                 if match:
                     old_name = match.group(1)
                     if old_name not in self.var_map:
                         self.var_map[old_name] = self.generate_var_name()
-            
-            result_lines.append(line)
-        
-        # Replace all occurrences
-        result = '\n'.join(result_lines)
+
+        result = '\n'.join(lines)
         for old_name, new_name in self.var_map.items():
-            # Use word boundaries to avoid partial replacements
-            result = re.sub(r'\b' + old_name + r'\b', new_name, result)
-        
-        return result
-    
-    def encode_strings(self, code):
-        """Encode string literals using Lua escape sequences."""
-        def replace_string(match):
-            string_content = match.group(1)
-            
-            # Convert each character to Lua decimal escape sequence
-            escaped = ''
-            for char in string_content:
-                byte_val = ord(char)
-                escaped += '\\' + str(byte_val).zfill(3)
-            
-            return '"' + escaped + '"'
-        
-        # Replace strings
-        code = re.sub(r'"([^"]*)"', replace_string, code)
-        code = re.sub(r"'([^']*)'", replace_string, code)
-        
-        return code
-        def replace_string(match):
-            string_content = match.group(1)
-            # Convert to byte array
-            bytes_arr = [str(ord(c)) for c in string_content]
-            return f'string.char({",".join(bytes_arr)})'
-        
-        # Replace double-quoted strings
-        code = re.sub(r'"([^"]*)"', replace_string, code)
-        
-        # Replace single-quoted strings
-        code = re.sub(r"'([^']*)'", replace_string, code)
-        
-        return code
-    
-    def encode_numbers(self, code):
-        """Obfuscate numeric literals."""
-        def replace_number(match):
-            num = int(match.group(0))
-            # Convert to mathematical expression
-            if num > 10:
-                # Split into sum
-                a = num // 2
-                b = num - a
-                return f'({a}+{b})'
-            return match.group(0)
-        
-        # Replace standalone numbers
-        code = re.sub(r'\b\d+\b', replace_number, code)
-        
-        return code
-    
-    def add_control_flow(self, code):
-        """Add fake control flow."""
-        # Add dummy conditionals that always evaluate to false
-        junk_conditions = [
-            'if false then return end\n',
-            'if 1 > 2 then error("x") end\n',
-            'while false do end\n'
-        ]
-        
-        lines = code.split('\n')
-        result_lines = []
-        
-        for i, line in enumerate(lines):
-            result_lines.append(line)
-            # Randomly insert junk conditions
-            if i % 10 == 0 and not line.strip().startswith('--'):
-                import random
-                result_lines.append(random.choice(junk_conditions).rstrip())
-        
-        return '\n'.join(result_lines)
-    
-    def add_junk_code(self, code):
-        """Add non-functional junk code."""
-        junk_snippets = [
-            'local _ = function() return nil end',
-            'local __ = {}',
-            'local ___ = 0',
-            'if nil then end',
-        ]
-        
-        lines = code.split('\n')
-        result_lines = []
-        
-        import random
-        for i, line in enumerate(lines):
-            result_lines.append(line)
-            if i % 15 == 0:
-                result_lines.append(random.choice(junk_snippets))
-        
-        return '\n'.join(result_lines)
-    
-    def add_anti_debug(self, code):
-        """Add anti-debugging checks."""
-        anti_debug_code = '''
--- Anti-debug checks
-local function _check()
-    if getfenv then
-        local env = getfenv(2)
-        if env.script then return end
-    end
-end
-_check()
-'''
-        return anti_debug_code + '\n' + code
-    
-    def wrap_in_function(self, code):
-        return f'return(function(...)\n{code}\nend)(...)'
-    
-    
-    def minify_code(self, code):
-        """Remove whitespace and minimize code size."""
-        # Remove comments
-        code = re.sub(r'--[^\n]*', '', code)
-        
-        # Remove multi-line comments
-        code = re.sub(r'--\[\[.*?\]\]', '', code, flags=re.DOTALL)
-        
-        # Remove extra whitespace
-        lines = code.split('\n')
-        lines = [line.strip() for line in lines if line.strip()]
-        
-        # Join with minimal spacing
-        result = ' '.join(lines)
-        
-        # Clean up spacing around operators
-        result = re.sub(r'\s+', ' ', result)
-        result = re.sub(r'\s*([=+\-*/<>~,;:])\s*', r'\1', result)
-        
+            result = re.sub(r'\b' + re.escape(old_name) + r'\b', new_name, result)
         return result
 
+    def encode_strings(self, code):
+        """Encode strings as string.char() calls — safe for executors."""
+        result = []
+        i = 0
+        n = len(code)
+        while i < n:
+            # Skip single-line comments
+            if code[i:i+2] == '--' and code[i:i+4] != '--[[':
+                end = code.find('\n', i)
+                if end == -1:
+                    result.append(code[i:])
+                    break
+                result.append(code[i:end])
+                i = end
+                continue
+
+            # Skip multi-line comments
+            if code[i:i+4] == '--[[':
+                end = code.find(']]', i+4)
+                if end == -1:
+                    result.append(code[i:])
+                    break
+                result.append(code[i:end+2])
+                i = end + 2
+                continue
+
+            # Handle strings
+            if code[i] in ('"', "'"):
+                quote = code[i]
+                j = i + 1
+                content = []
+                while j < n:
+                    if code[j] == '\\' and j + 1 < n:
+                        # Keep escape sequences as-is by getting actual char
+                        esc = code[j:j+2]
+                        # Just collect the raw char after escape
+                        content.append(code[j+1])
+                        j += 2
+                        continue
+                    if code[j] == quote:
+                        j += 1
+                        break
+                    content.append(code[j])
+                    j += 1
+                # Build string.char() expression
+                escaped = ''.join('\\' + str(ord(c)).zfill(3) for c in ''.join(content))
+                result.append(f'"{escaped}"')
+                i = j
+                continue
+
+            result.append(code[i])
+            i += 1
+
+        return ''.join(result)
+
+    def encode_numbers(self, code):
+        """Only encode standalone integer literals, not inside strings or decimals."""
+        def replace_number(match):
+            num_str = match.group(0)
+            num = int(num_str)
+            if num > 10:
+                a = random.randint(1, num - 1)
+                b = num - a
+                return f'({a}+{b})'
+            return num_str
+
+        # Only match integers not preceded/followed by . (avoid floats/decimals)
+        return re.sub(r'(?<![.\w])\b([1-9][0-9]+)\b(?!\s*\.)', replace_number, code)
+
+    def add_control_flow(self, code):
+        """Insert junk control flow only at safe points (end of complete lines)."""
+        junk = [
+            'do local _=nil end',
+            'if false then end',
+            'while false do break end',
+        ]
+        lines = code.split('\n')
+        result = []
+        for i, line in enumerate(lines):
+            result.append(line)
+            stripped = line.strip()
+            # Only insert after lines that are clearly complete statements
+            if (i % 8 == 0 and stripped and
+                not stripped.startswith('--') and
+                not stripped.endswith(',') and
+                not stripped.endswith('(') and
+                not stripped.endswith('{') and
+                not stripped.endswith('and') and
+                not stripped.endswith('or') and
+                not stripped.endswith('=') and
+                not stripped.endswith('..') and
+                stripped not in ('', 'do', 'then', 'else', 'repeat')):
+                result.append(random.choice(junk))
+        return '\n'.join(result)
+
+    def add_junk_code(self, code):
+        """Insert junk locals only at safe points."""
+        junk = [
+            'local _junk0=nil',
+            'local _junk1=0',
+            'local _junk2=false',
+        ]
+        lines = code.split('\n')
+        result = []
+        for i, line in enumerate(lines):
+            result.append(line)
+            stripped = line.strip()
+            if (i % 12 == 0 and stripped and
+                not stripped.startswith('--') and
+                not stripped.endswith(',') and
+                not stripped.endswith('(') and
+                not stripped.endswith('{') and
+                not stripped.endswith('and') and
+                not stripped.endswith('or') and
+                not stripped.endswith('=') and
+                not stripped.endswith('..') and
+                stripped not in ('', 'do', 'then', 'else', 'repeat')):
+                result.append(random.choice(junk))
+        return '\n'.join(result)
+
+    def add_anti_debug(self, code):
+        anti_debug = 'if not game or not game:GetService("Players") then return end\n'
+        return anti_debug + code
+
+    def wrap_in_function(self, code):
+        return f'return(function(...)\n{code}\nend)(...)'
+
+    def minify_code(self, code):
+        # Remove single-line comments
+        code = re.sub(r'--(?!\[\[)[^\n]*', '', code)
+        # Remove multi-line comments
+        code = re.sub(r'--\[\[.*?\]\]', '', code, flags=re.DOTALL)
+        # Strip lines and remove blanks
+        lines = [line.strip() for line in code.split('\n') if line.strip()]
+        # Join with newlines (safer than spaces — avoids keyword merging)
+        return '\n'.join(lines)
 
 # --- ProxifyLocals Obfuscation ---
 class LuaProxifyLocals:
@@ -1139,11 +1122,32 @@ end)(...)'''
         return loader
 
 
+class LuaLocalizer:
+    @staticmethod
+    def localize(code):
+        services = set(re.findall(r'game:GetService\(["\'](\w+)["\']\)', code))
+        globals_to_fix = ["Vector3", "CFrame", "Instance", "UDim2", "Color3", "task", "wait", "spawn"]
+        
+        found_globals = [g for g in globals_to_fix if re.search(r'\b' + g + r'\b', code)]
+        
+        header = "-- [[ Callum's Auto-Localization ]]\n"
+        for service in services:
+            header += f'local {service} = game:GetService("{service}")\n'
+        for g in found_globals:
+            header += f'local {g} = {g}\n'
+        
+        # Replace game:GetService calls with direct service variable
+        for service in services:
+            code = code.replace(f'game:GetService("{service}")', service)
+            code = code.replace(f"game:GetService('{service}')", service)
+            
+        return header + "\n" + code
+
 # --- Main Application Window ---
 class LuaIDE(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LuaBox v2.7 	(̿▀̿ ̿Ĺ̯̿̿▀̿ ̿)̄")
+        self.setWindowTitle("LuaBox v4")
         self.setGeometry(100, 100, 1400, 850)
         
         self.current_file = None
@@ -1278,12 +1282,18 @@ class LuaIDE(QMainWindow):
         btn_settings = QPushButton("Settings")
         btn_settings.setStyleSheet("background-color: #E8D6F0;")
         btn_settings.clicked.connect(self.show_settings)
+
+        btn_format = QPushButton("Format Code")
+        btn_format.setStyleSheet("background-color: #E6F3FF;")
+        btn_format.clicked.connect(self.format_current_code)
         
         btn_strip = QPushButton("Remove Comments")
         btn_strip.clicked.connect(self.remove_comments)
         
         btn_find_replace = QPushButton("Find & Replace")
         btn_find_replace.clicked.connect(self.show_find_replace)
+
+        
         
         btn_obfuscate = QPushButton("Obfuscate")
         btn_obfuscate.setStyleSheet("background-color: #FFE6E6;")
@@ -1348,18 +1358,32 @@ class LuaIDE(QMainWindow):
         
         explorer_label = QLabel("Explorer")
         explorer_label.setStyleSheet("font-weight: bold;")
+
+        btn_browse = QPushButton("📁")
+        btn_browse.setMaximumWidth(30)
+        btn_browse.setToolTip("Browse for directory")
+        btn_browse.clicked.connect(self.browse_directory)
+
+
+
+        
         btn_refresh = QPushButton("⟳")
         btn_refresh.setMaximumWidth(30)
+        btn_refresh.setToolTip("Refresh explorer")
         btn_refresh.clicked.connect(self.refresh_explorer)
         
         explorer_header_layout.addWidget(explorer_label)
         explorer_header_layout.addStretch()
+        explorer_header_layout.addWidget(btn_browse)
         explorer_header_layout.addWidget(btn_refresh)
         
         self.file_tree = QTreeWidget()
         self.file_tree.setHeaderLabels(["Name", "Size"])
         self.file_tree.setColumnWidth(0, 150)
         self.file_tree.itemDoubleClicked.connect(self.tree_item_double_clicked)
+        self.file_tree.itemExpanded.connect(self.tree_item_expanded)
+        self.file_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_tree.customContextMenuRequested.connect(self.show_tree_context_menu)
         
         explorer_tab_layout.addWidget(explorer_header)
         explorer_tab_layout.addWidget(self.file_tree)
@@ -1501,29 +1525,163 @@ class LuaIDE(QMainWindow):
                 self.tab_widget.setTabText(0, "Untitled")
 
     def refresh_explorer(self):
-        """Refresh the file explorer."""
+        """Refresh the file explorer with directory tree."""
         self.file_tree.clear()
         
-        directory = QDir(self.current_directory)
-        files = directory.entryInfoList(QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
+        # Add current path as root
+        root_item = QTreeWidgetItem(self.file_tree)
+        root_item.setText(0, self.current_directory)
+        root_item.setText(1, "")
+        root_item.setData(0, Qt.ItemDataRole.UserRole, self.current_directory)
+        root_item.setExpanded(True)
         
-        for file_info in files:
-            item = QTreeWidgetItem(self.file_tree)
-            item.setText(0, file_info.fileName())
-            size_kb = file_info.size() / 1024
-            item.setText(1, f"{size_kb:.2f} KB")
-            item.setData(0, Qt.ItemDataRole.UserRole, file_info.absoluteFilePath())
+        # Populate directory tree
+        self.populate_directory_tree(root_item, self.current_directory)
 
+
+    def populate_directory_tree(self, parent_item, directory_path):
+        """Recursively populate directory tree."""
+        try:
+            directory = QDir(directory_path)
+            
+            # Get directories first
+            dirs = directory.entryInfoList(
+                QDir.Filter.Dirs | QDir.Filter.NoDotAndDotDot,
+                QDir.SortFlag.Name
+            )
+            
+            for dir_info in dirs:
+                dir_item = QTreeWidgetItem(parent_item)
+                dir_item.setText(0, f"📁 {dir_info.fileName()}")
+                dir_item.setText(1, "<DIR>")
+                dir_item.setData(0, Qt.ItemDataRole.UserRole, dir_info.absoluteFilePath())
+                
+                # Add placeholder for lazy loading
+                placeholder = QTreeWidgetItem(dir_item)
+                placeholder.setText(0, "Loading...")
+            
+            # Get files
+            files = directory.entryInfoList(
+                QDir.Filter.Files | QDir.Filter.NoDotAndDotDot,
+                QDir.SortFlag.Name
+            )
+            
+            for file_info in files:
+                file_item = QTreeWidgetItem(parent_item)
+                file_item.setText(0, f"📄 {file_info.fileName()}")
+                size_kb = file_info.size() / 1024
+                file_item.setText(1, f"{size_kb:.2f} KB")
+                file_item.setData(0, Qt.ItemDataRole.UserRole, file_info.absoluteFilePath())
+        
+        except Exception as e:
+            error_item = QTreeWidgetItem(parent_item)
+            error_item.setText(0, f"Error: {str(e)}")
+    
+    def browse_directory(self):
+        """Open dialog to browse and select a directory."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Directory", self.current_directory
+        )
+        if directory:
+            self.current_directory = directory
+            self.refresh_explorer()
+    
+    def show_tree_context_menu(self, position):
+        """Show context menu for file tree items."""
+        item = self.file_tree.itemAt(position)
+        if not item:
+            return
+        
+        filepath = item.data(0, Qt.ItemDataRole.UserRole)
+        if not filepath:
+            return
+        
+        menu = QMenu(self)
+        
+        # Add actions based on whether it's a file or directory
+        if os.path.isfile(filepath):
+            open_action = menu.addAction("Open")
+            open_action.triggered.connect(lambda: self.tree_item_double_clicked(item, 0))
+        
+        if os.path.isdir(filepath):
+            set_as_root_action = menu.addAction("Set as Root Directory")
+            set_as_root_action.triggered.connect(lambda: self.set_root_directory(filepath))
+        
+        menu.addSeparator()
+        
+        copy_path_action = menu.addAction("Copy Path")
+        copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(filepath))
+        
+        copy_name_action = menu.addAction("Copy Name")
+        copy_name_action.triggered.connect(lambda: QApplication.clipboard().setText(os.path.basename(filepath)))
+        
+        menu.addSeparator()
+        
+        if os.path.exists(filepath):
+            show_in_folder_action = menu.addAction("Show in Folder")
+            show_in_folder_action.triggered.connect(lambda: self.show_in_system_explorer(filepath))
+        
+        menu.exec(self.file_tree.viewport().mapToGlobal(position))
+    
+    def set_root_directory(self, directory_path):
+        """Set the selected directory as the root in explorer."""
+        self.current_directory = directory_path
+        self.refresh_explorer()
+    
+    def show_in_system_explorer(self, filepath):
+        """Open the system file explorer at the given path."""
+        try:
+            if os.path.isfile(filepath):
+                filepath = os.path.dirname(filepath)
+            
+            if sys.platform == 'win32':
+                os.startfile(filepath)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', filepath])
+            else:  # Linux and other Unix-like
+                subprocess.run(['xdg-open', filepath])
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not open folder: {str(e)}")
+
+    def tree_item_expanded(self, item):
+        """Handle tree item expansion for lazy loading."""
+        # Check if this item has a placeholder child
+        if item.childCount() == 1:
+            child = item.child(0)
+            if child.text(0) == "Loading...":
+                # Remove placeholder
+                item.removeChild(child)
+                
+                # Get the directory path
+                directory_path = item.data(0, Qt.ItemDataRole.UserRole)
+                
+                # Populate this directory
+                if directory_path and os.path.isdir(directory_path):
+                    self.populate_directory_tree(item, directory_path)
+    
     def tree_item_double_clicked(self, item, column):
         """Handle double-click on file explorer item."""
         filepath = item.data(0, Qt.ItemDataRole.UserRole)
-        if filepath and os.path.isfile(filepath):
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
+        
+        if filepath:
+            if os.path.isfile(filepath):
+                # Open file
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    editor = self.create_new_tab(os.path.basename(filepath))
+                    editor.setPlainText(content)
+                    editor.file_path = filepath
+                    
+                    # Add to recent files
+                    self.add_recent_file(filepath)
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Could not open file: {str(e)}")
             
-            editor = self.create_new_tab(os.path.basename(filepath))
-            editor.setPlainText(content)
-            editor.file_path = filepath
+            elif os.path.isdir(filepath):
+                # Toggle expansion for directories
+                item.setExpanded(not item.isExpanded())
 
     def show_settings(self):
         """Show settings dialog."""
@@ -1537,7 +1695,7 @@ class LuaIDE(QMainWindow):
                 if editor:
                     font = editor.font()
                     font.setPointSize(font_size)
-                    editor.setFont(font)
+                    editor.setFont(font)(font)
 
     def remove_comments(self):
         """Smart comment removal that preserves code structure."""
@@ -4240,6 +4398,131 @@ end
                 self.add_recent_file(filepath)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to open file: {str(e)}")
+
+    def format_current_code(self):
+        """Format the code in the current editor tab."""
+        editor = self.get_current_editor()
+        if not editor:
+            return
+        
+        code = editor.toPlainText()
+        if not code.strip():
+            QMessageBox.information(self, "Format Code", "No code to format.")
+            return
+        
+        try:
+            formatted_code = self.format_lua_code(code)
+            
+            # Save cursor position
+            cursor = editor.textCursor()
+            old_position = cursor.position()
+            
+            # Replace text
+            editor.setPlainText(formatted_code)
+            
+            # Try to restore cursor position (approximately)
+            new_position = min(old_position, len(formatted_code))
+            cursor.setPosition(new_position)
+            editor.setTextCursor(cursor)
+            
+            self.statusBar().showMessage("Code formatted successfully", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Format Error", f"Error formatting code: {str(e)}")
+    
+    def format_lua_code(self, code):
+        """
+        Format Lua code with proper indentation and spacing.
+        Handles Roblox-specific patterns and preserves strings/comments.
+        """
+        lines = code.split('\n')
+        formatted_lines = []
+        indent_level = 0
+        indent_str = "    "  # 4 spaces
+        
+        # Track if we're in a multi-line string or comment
+        in_multiline_comment = False
+        in_multiline_string = False
+        string_delimiter = None
+        
+        for line_num, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Skip empty lines but preserve them
+            if not stripped:
+                formatted_lines.append('')
+                continue
+            
+            # Handle multi-line comments
+            if in_multiline_comment:
+                formatted_lines.append(indent_str * indent_level + stripped)
+                if ']]' in stripped:
+                    in_multiline_comment = False
+                continue
+            
+            if '--[[' in stripped and not ']]' in stripped:
+                in_multiline_comment = True
+                formatted_lines.append(indent_str * indent_level + stripped)
+                continue
+            
+            # Handle single-line comments (preserve as-is with current indent)
+            if stripped.startswith('--'):
+                formatted_lines.append(indent_str * indent_level + stripped)
+                continue
+            
+            # Decrease indent for these keywords (they appear at the end of blocks)
+            if stripped.startswith('end') or stripped.startswith('until'):
+                indent_level = max(0, indent_level - 1)
+            elif stripped.startswith('else') or stripped.startswith('elseif'):
+                # else/elseif temporarily dedent
+                formatted_lines.append(indent_str * max(0, indent_level - 1) + stripped)
+                continue
+            
+            # Apply current indentation
+            formatted_line = indent_str * indent_level + stripped
+            
+            # Format spacing around operators (only if not a comment)
+            if not stripped.startswith('--'):
+                # Add spaces around operators (but be careful with strings)
+                operators = [
+                    ('==', ' == '), ('~=', ' ~= '), ('<=', ' <= '), ('>=', ' >= '),
+                    ('..', ' .. '), (' = ', ' = '),
+                    (' < ', ' < '), (' > ', ' > '),
+                    (' + ', ' + '), (' - ', ' - '), (' * ', ' * '), (' / ', ' / '),
+                    (' % ', ' % '), (' ^ ', ' ^ ')
+                ]
+                
+                # Simple approach: add spaces (this could be improved to avoid affecting strings)
+                for old, new in operators:
+                    formatted_line = formatted_line.replace(old, new)
+                
+                # Fix spacing after commas
+                formatted_line = re.sub(r',(\S)', r', \1', formatted_line)
+                
+                # Clean up multiple spaces
+                formatted_line = re.sub(r'  +', ' ', formatted_line)
+                
+                # Remove space before commas
+                formatted_line = re.sub(r'\s+,', ',', formatted_line)
+            
+            formatted_lines.append(formatted_line.rstrip())
+            
+            # Increase indent for block-starting keywords
+            if (stripped.startswith('function') or 
+                stripped.startswith('if ') or stripped.startswith('if(') or
+                stripped.startswith('for ') or stripped.startswith('for(') or
+                stripped.startswith('while ') or stripped.startswith('while(') or
+                stripped.startswith('repeat') or
+                (stripped.startswith('do') and not stripped.startswith('do end')) or
+                stripped.startswith('local function')):
+                indent_level += 1
+            # Check for inline then/do
+            elif 'then' in stripped or (stripped.endswith('do') and not stripped.startswith('do')):
+                indent_level += 1
+            # elseif increases indent after itself
+            elif stripped.startswith('else'):
+                indent_level += 1
+        
+        return '\n'.join(formatted_lines)           
     
     def clear_recent_files(self):
         """Clear the recent files list."""
@@ -4253,6 +4536,7 @@ end
             self.save_recent_files()
 
 
+    
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     ide = LuaIDE()
